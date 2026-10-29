@@ -1,0 +1,9 @@
+# Local/server-only credentials and runtime logs
+/famgateway.config.php
+/.env
+/.env.*
+!/.env.example
+*.log
+telegram_log.txt
+service-account*.json
+firebase-admin*.json

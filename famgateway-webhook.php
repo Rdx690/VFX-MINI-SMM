@@ -1,69 +1,83 @@
 <?php
 declare(strict_types=1);
 
-/**
- * FamGateway webhook receiver.
- * Requires:
- * - FAMGATEWAY_API_KEY
- * - FIREBASE_DATABASE_URL
- * - FIREBASE_ADMIN_TOKEN (or replace REST helper with Firebase Admin SDK)
- * - A Cloud Function / Admin SDK implementation for atomic balance-credit transactions.
- *
- * This endpoint verifies HMAC signatures, stores webhook event details, and rejects duplicate
- * order/UTR events. To avoid unsafe non-atomic balance writes, it fails closed before crediting.
- */
 $config = require __DIR__ . '/famgateway.config.php';
+require_once __DIR__ . '/famgateway-lib.php';
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 
-function reply(int $code, array $body): never {
-    http_response_code($code);
-    echo json_encode($body, JSON_UNESCAPED_SLASHES);
-    exit;
-}
-function fbRequest(array $c,string $path,string $method='GET',?array $body=null): array {
-    if(empty($c['firebase_admin_token'])) throw new RuntimeException('Firebase Admin credential is not configured');
-    $url=rtrim((string)$c['firebase_database_url'],'/').'/'.ltrim($path,'/').'.json?auth='.rawurlencode((string)$c['firebase_admin_token']);
-    $ch=curl_init($url);
-    curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_CUSTOMREQUEST=>$method,CURLOPT_CONNECTTIMEOUT=>8,CURLOPT_TIMEOUT=>15,CURLOPT_SSL_VERIFYPEER=>true,CURLOPT_SSL_VERIFYHOST=>2,CURLOPT_HTTPHEADER=>['Content-Type: application/json']]);
-    if($body!==null) curl_setopt($ch,CURLOPT_POSTFIELDS,json_encode($body,JSON_UNESCAPED_SLASHES));
-    $raw=curl_exec($ch);$code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);$err=curl_error($ch);curl_close($ch);
-    if($raw===false||$code<200||$code>=300)throw new RuntimeException('Firebase request failed '.$code.' '.$err);
-    $decoded=json_decode($raw,true);return is_array($decoded)?$decoded:['value'=>$decoded];
-}
-try {
-    if($_SERVER['REQUEST_METHOD']!=='POST') reply(405,['status'=>'error','message'=>'POST required']);
-    $raw=file_get_contents('php://input');
-    if($raw===false||$raw==='') reply(400,['status'=>'error','message'=>'Empty payload']);
-    $signature=(string)($_SERVER['HTTP_X_FAMGATEWAY_SIGNATURE']??'');
-    $key=(string)($config['webhook_secret']??'');
-    if($key===''||!preg_match('/^[a-f0-9]{64}$/i',$signature)) reply(401,['status'=>'error','message'=>'Missing or malformed signature']);
-    $expected=hash_hmac('sha256',$raw,$key);
-    if(!hash_equals($expected,strtolower($signature))) reply(401,['status'=>'error','message'=>'Invalid webhook signature']);
-    $event=json_decode($raw,true);
-    if(!is_array($event)) reply(400,['status'=>'error','message'=>'Malformed JSON']);
-    if(($event['event']??'')!=='payment.success'||strtolower((string)($event['status']??''))!=='success') reply(200,['status'=>'ignored']);
-
-    $orderId=preg_replace('/[^A-Za-z0-9_-]/','',(string)($event['order_id']??''));
-    $utr=trim((string)($event['utr']??''));
-    $amount=filter_var($event['amount']??null,FILTER_VALIDATE_FLOAT);
-    if($orderId===''||$utr===''||$amount===false||(float)$amount<=0) reply(422,['status'=>'error','message'=>'Required payment fields are missing']);
-
-    $intent=fbRequest($config,'famgateway_orders/'.$orderId);
-    if(!is_array($intent)||empty($intent['uid'])||empty($intent['amount'])) reply(404,['status'=>'error','message'=>'Unknown order']);
-    if(abs((float)$intent['amount']-(float)$amount)>0.001) reply(409,['status'=>'error','message'=>'Amount mismatch']);
-
-    // Record verified event data; the actual balance credit must be performed via a trusted
-    // Firebase Admin SDK transaction/Cloud Function using unique order_id and UTR constraints.
-    fbRequest($config,'famgateway_webhook_events/'.$orderId,'PUT',[
-        'order_id'=>$orderId,'utr'=>$utr,'amount'=>number_format((float)$amount,2,'.',''),
-        'uid'=>(string)$intent['uid'],'signature_verified'=>true,'status'=>'verified_pending_atomic_credit',
-        'received_at'=>gmdate('c')
+function gatewayVerify(array $config, string $orderId): array {
+    $key = (string)($config['api_key'] ?? '');
+    if ($key === '') throw new RuntimeException('FamGateway API key is not configured');
+    $url = 'https://famgateway.in/api/verify-order.php?order_id=' . rawurlencode($orderId);
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => ['Accept: application/json', 'X-Api-Key: ' . $key],
+        CURLOPT_CONNECTTIMEOUT => 8,
+        CURLOPT_TIMEOUT => 20,
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_SSL_VERIFYHOST => 2,
     ]);
+    $raw = curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $error = curl_error($ch);
+    curl_close($ch);
+    if ($raw === false || $code < 200 || $code >= 300) throw new RuntimeException('Gateway verification failed: ' . $code . ' ' . $error);
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) throw new RuntimeException('Gateway returned invalid verification JSON');
+    return $decoded;
+}
 
-    // Deliberately do not claim a wallet balance was credited. Atomic Firebase transaction adapter is required.
-    reply(503,['status'=>'needs_atomic_ledger','message'=>'Webhook authenticated and recorded; atomic balance credit adapter is required before enabling auto-credit']);
-} catch(Throwable $e) {
-    error_log('[FamGateway webhook] '.$e->getMessage());
-    reply(500,['status'=>'error','message'=>'Webhook processing failed']);
+try {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') fg_reply(405, ['status'=>'error','message'=>'POST required']);
+    $raw = file_get_contents('php://input');
+    if (!is_string($raw) || $raw === '' || strlen($raw) > 65536) fg_reply(400, ['status'=>'error','message'=>'Empty or oversized webhook payload']);
+
+    $signature = trim((string)($_SERVER['HTTP_X_FAMGATEWAY_SIGNATURE'] ?? ''));
+    $secret = (string)($config['webhook_secret'] ?? '');
+    if ($secret === '' || !preg_match('/^[a-f0-9]{64}$/i', $signature)) fg_reply(401, ['status'=>'error','message'=>'Missing or malformed signature']);
+    $expectedSignature = hash_hmac('sha256', $raw, $secret);
+    if (!hash_equals($expectedSignature, strtolower($signature))) fg_reply(401, ['status'=>'error','message'=>'Invalid webhook signature']);
+
+    $event = json_decode($raw, true);
+    if (!is_array($event)) fg_reply(400, ['status'=>'error','message'=>'Malformed webhook JSON']);
+    $payload = is_array($event['data'] ?? null) ? array_merge($event, $event['data']) : $event;
+    if (($payload['event'] ?? '') !== 'payment.success' || strtolower((string)($payload['status'] ?? '')) !== 'success') {
+        fg_reply(200, ['status'=>'ignored','message'=>'Event is not a successful payment']);
+    }
+
+    $orderId = (string)($payload['order_id'] ?? '');
+    if (!preg_match('/^[A-Za-z0-9_-]{1,100}$/', $orderId)) fg_reply(422, ['status'=>'error','message'=>'Invalid order ID']);
+    $eventAmount = filter_var($payload['amount'] ?? null, FILTER_VALIDATE_FLOAT);
+    if ($eventAmount === false || !is_finite((float)$eventAmount) || (float)$eventAmount <= 0) fg_reply(422, ['status'=>'error','message'=>'Invalid webhook amount']);
+
+    $intent = fg_firebase($config, 'famgateway_orders/' . rawurlencode($orderId));
+    if (!is_array($intent) || empty($intent['uid']) || !isset($intent['amount'])) fg_reply(404, ['status'=>'error','message'=>'Unknown payment order']);
+    if (($intent['status'] ?? '') === 'completed') fg_reply(200, ['status'=>'success','message'=>'Order already credited','order_id'=>$orderId]);
+    $expectedAmount = (float)$intent['amount'];
+    if (abs((float)$eventAmount - $expectedAmount) > 0.001) fg_reply(409, ['status'=>'error','message'=>'Webhook amount does not match stored order']);
+
+    // Never rely on webhook payload alone: independently verify the order using the merchant API key.
+    $verification = gatewayVerify($config, $orderId);
+    $verified = is_array($verification['data'] ?? null) ? $verification['data'] : $verification;
+    $gatewayStatus = strtolower((string)($verified['status'] ?? $verification['status'] ?? ''));
+    if (!in_array($gatewayStatus, ['success','paid','completed'], true)) {
+        fg_reply(202, ['status'=>'pending','message'=>'Gateway has not independently confirmed this order']);
+    }
+    $verifiedAmount = filter_var($verified['amount'] ?? $verified['payable_amount'] ?? null, FILTER_VALIDATE_FLOAT);
+    if ($verifiedAmount === false || abs((float)$verifiedAmount - $expectedAmount) > 0.001) {
+        fg_reply(409, ['status'=>'error','message'=>'Verified gateway amount does not match stored order']);
+    }
+    $utr = trim((string)($verified['utr'] ?? $verified['transaction_id'] ?? $payload['utr'] ?? $payload['transaction_id'] ?? ''));
+    $eventUtr = trim((string)($payload['utr'] ?? $payload['transaction_id'] ?? ''));
+    if ($utr === '' || ($eventUtr !== '' && $eventUtr !== $utr)) {
+        fg_reply(409, ['status'=>'error','message'=>'Missing or inconsistent transaction reference']);
+    }
+
+    $credit = fg_credit_wallet($config, (string)$intent['uid'], $orderId, $expectedAmount, $utr, (string)($verified['transaction_id'] ?? $payload['transaction_id'] ?? ''));
+    fg_reply(200, ['status'=>'success','message'=>($credit['already_credited'] ? 'Order already credited' : 'Wallet credited successfully'),'order_id'=>$orderId]);
+} catch (Throwable $e) {
+    error_log('[FamGateway webhook] ' . $e->getMessage());
+    fg_reply(500, ['status'=>'error','message'=>'Webhook processing failed; gateway may retry']);
 }
