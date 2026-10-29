@@ -15,4 +15,6 @@ return [
     'min_amount' => 10.00,
     'max_amount' => 50000.00,
     'currency' => 'INR',
+    // Set this to your canonical HTTPS domain; do not derive webhook URLs from browser headers.
+    'base_url' => rtrim(getenv('PANEL_BASE_URL') ?: '', '/'),
 ];
