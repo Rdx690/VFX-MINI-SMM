@@ -118,18 +118,23 @@ try {
     $userRecord = firebaseRequest($config, 'users/' . rawurlencode($uid));
     if (!is_array($userRecord)) reply(404, ['status'=>'error','message'=>'Panel account not found']);
 
+    $baseUrl = rtrim((string)($config['base_url'] ?? ''), '/');
+    if ($baseUrl === '' || !str_starts_with($baseUrl, 'https://')) {
+        reply(500, ['status'=>'error','message'=>'PANEL_BASE_URL must be configured as the canonical HTTPS domain']);
+    }
     $order = gatewayRequest($config, '/api/create-order', 'POST', [
         'amount' => number_format($amount, 2, '.', ''),
         'customer_name' => (string)($userRecord['username'] ?? $user['displayName'] ?? 'SMM Panel User'),
         'customer_email' => (string)($user['email'] ?? ''),
-        'webhook_url' => rtrim((string)($_SERVER['HTTP_ORIGIN'] ?? ''), '/') . '/famgateway-webhook.php',
+        'webhook_url' => $baseUrl . '/famgateway-webhook.php',
     ]);
     $data = $order['data'] ?? null;
     if (($order['status'] ?? '') !== 'success' || !is_array($data) || empty($data['order_id']) || empty($data['checkout_url'])) {
         reply(502, ['status'=>'error','message'=>'FamGateway did not return a valid order']);
     }
 
-    $orderId = preg_replace('/[^A-Za-z0-9_-]/', '', (string)$data['order_id']);
+    $orderId = (string)$data['order_id'];
+    if (!preg_match('/^[A-Za-z0-9_-]{1,100}$/', $orderId)) reply(502, ['status'=>'error','message'=>'FamGateway returned an invalid order ID']);
     // Record the intended user and amount server-side before returning checkout URL.
     $record = [
         'uid' => $uid,
