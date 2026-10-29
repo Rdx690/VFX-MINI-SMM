@@ -63,11 +63,87 @@ try {
     $utr=trim((string)($data['utr']??$data['transaction_id']??''));
     if($utr==='') reply(409,['status'=>'error','message'=>'Gateway confirmed payment without a transaction reference']);
 
-    // SECURITY NOTE: RTDB REST cannot atomically increment multiple separate records.
-    // Use Firebase Admin SDK / Cloud Function transaction in production for strict concurrency.
-    // This endpoint stores a pending credit request but intentionally does not credit balance
-    // unless the deployment supplies a trusted atomic ledger implementation.
-    reply(503,['status'=>'needs_atomic_ledger','message'=>'Gateway payment is verified, but automatic balance credit is disabled until an atomic, idempotent ledger adapter is configured. Contact admin with order ID '.$orderId]);
+    // Atomic idempotent credit: update the complete user node using Firebase RTDB ETag/If-Match.
+    // The wallet balance and per-user credit ledger live in the same node, so concurrent requests
+    // cannot both credit the same order. Retry conflicts by re-reading the latest user node.
+    $base = rtrim((string)$config['firebase_database_url'], '/');
+    $token = (string)$config['firebase_admin_token'];
+    $userUrl = $base . '/users/' . rawurlencode($uid) . '.json?auth=' . rawurlencode($token);
+    $credited = false;
+    for ($attempt = 0; $attempt < 5; $attempt++) {
+        $read = curl_init($userUrl);
+        curl_setopt_array($read, [
+            CURLOPT_RETURNTRANSFER=>true, CURLOPT_HTTPGET=>true,
+            CURLOPT_HTTPHEADER=>['X-Firebase-ETag: true'],
+            CURLOPT_CONNECTTIMEOUT=>8, CURLOPT_TIMEOUT=>15,
+            CURLOPT_SSL_VERIFYPEER=>true, CURLOPT_SSL_VERIFYHOST=>2
+        ]);
+        $userRaw = curl_exec($read);
+        $readCode = (int)curl_getinfo($read, CURLINFO_HTTP_CODE);
+        $etag = (string)curl_getinfo($read, CURLINFO_HEADER_OUT);
+        $headers = [];
+        curl_close($read);
+        if ($userRaw === false || $readCode !== 200) throw new RuntimeException('Unable to read wallet record for atomic credit');
+
+        // Read ETag separately with a header callback.
+        $etagRead = curl_init($userUrl);
+        curl_setopt_array($etagRead, [
+            CURLOPT_RETURNTRANSFER=>true, CURLOPT_HTTPGET=>true,
+            CURLOPT_HEADER=>true, CURLOPT_HTTPHEADER=>['X-Firebase-ETag: true'],
+            CURLOPT_CONNECTTIMEOUT=>8, CURLOPT_TIMEOUT=>15,
+            CURLOPT_SSL_VERIFYPEER=>true, CURLOPT_SSL_VERIFYHOST=>2
+        ]);
+        $etagResponse = curl_exec($etagRead);
+        $etagCode = (int)curl_getinfo($etagRead, CURLINFO_HTTP_CODE);
+        $headerSize = (int)curl_getinfo($etagRead, CURLINFO_HEADER_SIZE);
+        curl_close($etagRead);
+        if ($etagResponse === false || $etagCode !== 200) throw new RuntimeException('Unable to obtain wallet concurrency token');
+        $etagHeaders = substr($etagResponse, 0, $headerSize);
+        if (!preg_match('/^ETag:\\s*(.+)\\s*$/mi', $etagHeaders, $etagMatch)) throw new RuntimeException('Firebase did not return an ETag');
+        $etagValue = trim($etagMatch[1]);
+        $userNode = json_decode(substr($etagResponse, $headerSize), true);
+        if (!is_array($userNode)) throw new RuntimeException('Wallet record is invalid');
+
+        $credits = is_array($userNode['famgatewayCredits'] ?? null) ? $userNode['famgatewayCredits'] : [];
+        if (isset($credits[$orderId])) {
+            if (($credits[$orderId]['utr'] ?? '') !== $utr || abs((float)($credits[$orderId]['amount'] ?? 0) - $expectedAmount) > 0.001) {
+                reply(409, ['status'=>'error','message'=>'Order was already credited with conflicting details']);
+            }
+            $credited = true;
+            break;
+        }
+        $currentBalance = filter_var($userNode['balance'] ?? 0, FILTER_VALIDATE_FLOAT);
+        if ($currentBalance === false || !is_finite((float)$currentBalance)) throw new RuntimeException('Existing wallet balance is invalid');
+        $userNode['balance'] = round((float)$currentBalance + $expectedAmount, 2);
+        $userNode['famgatewayCredits'] = $credits;
+        $userNode['famgatewayCredits'][$orderId] = [
+            'order_id'=>$orderId, 'amount'=>number_format($expectedAmount, 2, '.', ''),
+            'utr'=>$utr, 'gateway'=>'FamGateway', 'credited_at'=>gmdate('c')
+        ];
+
+        $write = curl_init($userUrl);
+        curl_setopt_array($write, [
+            CURLOPT_RETURNTRANSFER=>true, CURLOPT_CUSTOMREQUEST=>'PUT',
+            CURLOPT_POSTFIELDS=>json_encode($userNode, JSON_UNESCAPED_SLASHES),
+            CURLOPT_HTTPHEADER=>['Content-Type: application/json', 'If-Match: '.$etagValue],
+            CURLOPT_CONNECTTIMEOUT=>8, CURLOPT_TIMEOUT=>15,
+            CURLOPT_SSL_VERIFYPEER=>true, CURLOPT_SSL_VERIFYHOST=>2
+        ]);
+        $writeBody = curl_exec($write);
+        $writeCode = (int)curl_getinfo($write, CURLINFO_HTTP_CODE);
+        curl_close($write);
+        if ($writeCode === 412) continue;
+        if ($writeBody === false || $writeCode < 200 || $writeCode >= 300) throw new RuntimeException('Atomic wallet update failed');
+        $credited = true;
+        break;
+    }
+    if (!$credited) reply(409, ['status'=>'retry','message'=>'Wallet changed concurrently. Retry payment verification.','order_id'=>$orderId]);
+
+    fb($config, 'famgateway_orders/'.$orderId, 'PATCH', [
+        'status'=>'completed', 'utr'=>$utr, 'transaction_id'=>(string)($data['transaction_id']??''),
+        'verified_at'=>gmdate('c')
+    ]);
+    reply(200, ['status'=>'success','message'=>'Payment verified and wallet credited','order_id'=>$orderId,'amount'=>number_format($expectedAmount,2,'.','')]);
 } catch(Throwable $e) {
     error_log('[FamGateway verify payment] '.$e->getMessage());
     reply(500,['status'=>'error','message'=>'Unable to verify payment right now. Try again shortly.']);
