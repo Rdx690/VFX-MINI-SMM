@@ -5,3 +5,5 @@
 !/.env.example
 *.log
 telegram_log.txt
+service-account*.json
+firebase-admin*.json
