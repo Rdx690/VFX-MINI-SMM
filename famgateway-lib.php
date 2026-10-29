@@ -46,7 +46,7 @@ function fg_claim_utr(array $c, string $utr, string $orderId, string $uid, float
     $key = hash('sha256', strtoupper(trim($utr)));
     $path = 'famgateway_utrs/' . $key;
     $existing = fg_firebase($c, $path);
-    $record = ($existing['value'] ?? '__not_null__') === null ? null : $existing;
+    $record = (array_key_exists('value', $existing) && $existing['value'] === null) ? null : $existing;
     if (is_array($record)) {
         if (($record['order_id'] ?? '') !== $orderId || ($record['uid'] ?? '') !== $uid) {
             throw new RuntimeException('Transaction reference has already been used for another order');
@@ -81,7 +81,7 @@ function fg_claim_utr(array $c, string $utr, string $orderId, string $uid, float
     // Another request may have claimed the same UTR between our read and conditional write.
     if ($code === 412) {
         $after = fg_firebase($c, $path);
-        $claimed = ($after['value'] ?? '__not_null__') === null ? null : $after;
+        $claimed = (array_key_exists('value', $after) && $after['value'] === null) ? null : $after;
         if (is_array($claimed) && ($claimed['order_id'] ?? '') === $orderId && ($claimed['uid'] ?? '') === $uid) return;
         throw new RuntimeException('Transaction reference was claimed by another order');
     }
