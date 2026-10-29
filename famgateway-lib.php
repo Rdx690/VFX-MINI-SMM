@@ -48,7 +48,7 @@ function fg_claim_utr(array $c, string $utr, string $orderId, string $uid, float
     $existing = fg_firebase($c, $path);
     $record = (array_key_exists('value', $existing) && $existing['value'] === null) ? null : $existing;
     if (is_array($record)) {
-        if (($record['order_id'] ?? '') !== $orderId || ($record['uid'] ?? '') !== $uid) {
+        if (($record['order_id'] ?? '') !== $orderId || ($record['uid'] ?? '') !== $uid || abs((float)($record['amount'] ?? 0) - $amount) > 0.001) {
             throw new RuntimeException('Transaction reference has already been used for another order');
         }
         return;
@@ -82,7 +82,7 @@ function fg_claim_utr(array $c, string $utr, string $orderId, string $uid, float
     if ($code === 412) {
         $after = fg_firebase($c, $path);
         $claimed = (array_key_exists('value', $after) && $after['value'] === null) ? null : $after;
-        if (is_array($claimed) && ($claimed['order_id'] ?? '') === $orderId && ($claimed['uid'] ?? '') === $uid) return;
+        if (is_array($claimed) && ($claimed['order_id'] ?? '') === $orderId && ($claimed['uid'] ?? '') === $uid && abs((float)($claimed['amount'] ?? 0) - $amount) <= 0.001) return;
         throw new RuntimeException('Transaction reference was claimed by another order');
     }
     throw new RuntimeException('Unable to reserve transaction reference: ' . $code . ' ' . $error);
