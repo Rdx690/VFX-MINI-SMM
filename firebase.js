@@ -1,23 +1,27 @@
-// FIREBASE CONFIGURATION & INITIALIZATION
+// Add your Firebase project configuration here when you're ready.
+// Keep credentials/API keys out of Git if they are private; use environment variables on the server.
 const firebaseConfig = {
-  apiKey: "AIzaSyDN_bht9IgtqUj100bBUE74zWzm0JWXxfE",
-  authDomain: "smm-panel-86035.firebaseapp.com",
-  databaseURL: "https://smm-panel-86035-default-rtdb.europe-west1.firebasedatabase.app",
-  projectId: "smm-panel-86035",
-  storageBucket: "smm-panel-86035.firebasestorage.app",
-  messagingSenderId: "800960046248",
-  appId: "1:800960046248:web:81ef85047450e2e0878e9d",
-  measurementId: "G-GZMKXT4ZZ5"
+  apiKey: "",
+  authDomain: "",
+  databaseURL: "",
+  projectId: "",
+  storageBucket: "",
+  messagingSenderId: "",
+  appId: "",
+  measurementId: ""
 };
 
-// Initialize Firebase
-firebase.initializeApp(firebaseConfig);
+// Initialization requires a completed Firebase config.
+if (firebaseConfig.apiKey && firebaseConfig.authDomain && firebaseConfig.databaseURL && firebaseConfig.projectId && firebaseConfig.appId) {
+  firebase.initializeApp(firebaseConfig);
+  const auth = firebase.auth();
+  const db = firebase.database();
+  window.auth = auth;
+  window.db = db;
+  console.log("Firebase initialized");
+} else {
+  console.warn("Firebase config is blank. Add your project values to firebase.js before using Firebase features.");
+}
 
-// Export Auth & DB globally
-const auth = firebase.auth();
-const db = firebase.database();
-
-// ImgBB API Key (Global)
-const IMGBB_KEY = "172dabb7ec93ead71d6b9e5631f3155d";
-
-console.log("Firebase Connected via firebase.js");
+// Add your ImgBB API key later if image uploads need it.
+const IMGBB_KEY = "";
