@@ -1,43 +1,51 @@
 # FamGateway migration — deployment checklist
 
-This branch introduces a new FamGateway-based Add Funds UI and server endpoints. **Do not merge or enable live deposits until the required server credentials and atomic balance ledger are configured.**
+This repository contains a FamGateway Add Funds UI and PHP endpoints. **The integration is not live-ready until private server credentials are configured and the gateway/Firebase flows pass staging tests.** A GitHub commit alone does not deploy files to InfinityFree; upload/sync the updated repository files to the hosting account separately.
 
-## What changed
-- `addfunds.html`: replaced the old static personal-UPI QR generator with a FamGateway order/checkout flow. The merchant key is not exposed to browser JavaScript.
-- `famgateway-create-order.php`: verifies the logged-in Firebase user ID token, creates a FamGateway order, and stores the order's intended user and amount server-side.
-- `famgateway-verify-payment.php`: verifies Firebase identity, order ownership, gateway payment status, transaction reference, and the exact stored amount before calling the shared idempotent wallet-credit helper.
-- `famgateway-webhook.php`: validates the HMAC-SHA256 signature over the raw body, independently verifies the order with FamGateway, checks the stored order/amount, then invokes the same idempotent wallet-credit helper.
-- `famgateway.config.example.php`: environment configuration template, including `PANEL_BASE_URL` for a canonical HTTPS webhook URL.
-- `famgateway-lib.php`: shared Firebase REST and ETag compare-and-set helper. The wallet balance and per-order credit ledger are saved in the same `users/{uid}` node so concurrent retries cannot credit the same order twice. A conditional claim at `famgateway_utrs/{sha256(UTR)}` also prevents one UTR being reused for a different order.
-- `check_payment.php`: disabled the legacy verification path because it accepted client-controlled amount/user identifiers and used obsolete gateway verification.
+## Current files
+- `addfunds.html`: Add Funds checkout UI. The merchant API key must stay server-side.
+- `famgateway-create-order.php`: validates a Firebase ID token, creates an order, and stores the intended user and amount server-side.
+- `famgateway-verify-payment.php`: verifies the authenticated user, order ownership, payment status, transaction reference, and stored amount before requesting wallet credit.
+- `famgateway-webhook.php`: validates a signature, independently verifies the order with FamGateway, and requests the same idempotent wallet-credit helper.
+- `famgateway-lib.php`: shared Firebase REST and ETag compare-and-set wallet helper.
+- `famgateway.config.example.php`: safe template only; it contains no live secrets.
+- `check_payment.php`: legacy verification path removed because it trusted client-controlled payment details.
 
-## Required deployment configuration
-The Firebase browser configuration in `firebase.js` and server settings in `famgateway.config.example.php` are intentionally blank so you can add your own values later. Firebase-dependent features and payments will not work until configured. Create a server-only `famgateway.config.php` from the example template, and ensure it is excluded from Git. Configure the following in the PHP hosting environment:
-- `FAMGATEWAY_API_KEY`: live merchant API key from the FamGateway dashboard.
-- `FIREBASE_WEB_API_KEY`: Firebase web API key used only server-side here to validate ID tokens. It is not a private service credential.
-- `FIREBASE_DATABASE_URL`: Realtime Database URL.
-- `PANEL_BASE_URL`: canonical HTTPS panel origin, e.g. `https://your-domain.example`; used to register the webhook URL.
-- `FIREBASE_ADMIN_TOKEN`: a server-side Firebase Admin REST credential/token with least privilege, or replace REST calls with the Firebase Admin SDK. Do not use a client-side database secret.
-- `FAMGATEWAY_WEBHOOK_SECRET`: leave blank until you confirm the exact signing secret and signature format with FamGateway; webhook verification will reject requests until configured.
+## Firebase browser configuration
+`firebase.js` has been restored with the panel's existing Firebase web configuration for project `smm-panel-86035`. The existing `index.html` was intentionally left unchanged. Firebase web configuration is designed to be used in the browser; **never put Firebase service-account JSON, private keys, or Admin SDK credentials in `firebase.js`, `index.html`, or any public GitHub file.**
 
-Configure the FamGateway webhook URL in the merchant dashboard as:
+The ImgBB key used by browser uploads is also visible to visitors when embedded in frontend JavaScript. If it is abused, rotate it in ImgBB.
+
+## Private server configuration
+Create `famgateway.config.php` on the PHP server from the example template, or configure the listed environment variables if the host supports them. Keep the real file out of Git. The PHP endpoints require these values:
+
+- `FAMGATEWAY_API_KEY`: private merchant API key from the FamGateway dashboard.
+- `FAMGATEWAY_WEBHOOK_SECRET`: only the actual signing secret and signature format confirmed by FamGateway. Do not guess this value.
+- `FIREBASE_WEB_API_KEY`: Firebase web API key used by the server to validate ID tokens. This is not a service-account private key.
+- `FIREBASE_DATABASE_URL`: the Realtime Database URL for `smm-panel-86035`.
+- `FIREBASE_ADMIN_TOKEN`: a server-side credential with the required Realtime Database access. A normal Firebase web API key is **not** an Admin token. Do not paste service-account JSON into this variable.
+- `PANEL_BASE_URL`: the canonical HTTPS origin for the deployed panel.
+
+Do not send merchant keys, Firebase Admin credentials, or service-account private keys in chat, commit them to GitHub, or put them in browser JavaScript. If a service-account private key was previously shared or committed, revoke that key and create a replacement.
+
+## Webhook setup
+After the PHP files and private server configuration are installed on a host that supports public incoming HTTPS webhooks, configure the FamGateway webhook URL as:
+
 `https://YOUR-DOMAIN.example/famgateway-webhook.php`
 
-## Production verification still required
+InfinityFree may impose restrictions on PHP outbound requests, environment variables, or incoming webhook requests. Do not assume this flow works there until it is tested end-to-end. If the host blocks required requests or cannot keep secrets private, use a PHP host/serverless backend that supports secure secrets and webhooks.
 
-The implementation now attempts idempotent credit by using Firebase Realtime Database ETags to compare-and-set the user's full record. This is safer than a normal read-then-write, but it is **not yet production-certified** and depends on the current data model storing the numeric wallet at `users/{uid}/balance`. Validate that the existing Firebase rules and data shape match this assumption.
+## Staging checklist before live deposits
+1. Confirm the official FamGateway order-creation endpoint, verification response fields, event names, signature header, and HMAC secret/format from current merchant documentation.
+2. Configure all required private values on the server; keep `famgateway.config.php` out of the repository.
+3. Confirm the database's actual wallet field and security rules match the implementation's assumptions.
+4. Run `php -l` on every PHP endpoint.
+5. Test pending, success, failed/expired, wrong-user, amount-mismatch, forged-signature, duplicate verification, duplicate webhook, and provider-timeout cases.
+6. Confirm retries never credit the same order twice and one transaction reference cannot fund multiple orders.
+7. Test wallet credit and order status recovery after partial failures.
+8. Only enable real deposits after successful staging tests and a reconciliation plan.
 
-Before accepting live payments:
-1. Configure the FamGateway API key, webhook signing secret, Firebase server credential, Firebase web API key, and `PANEL_BASE_URL` as server-side environment variables.
-2. Confirm FamGateway's exact verify-order response fields and webhook signature/event schema using a merchant test order.
-3. Run `php -l` on every PHP endpoint and test pending/success/expired orders, wrong-user requests, amount mismatch, forged signatures, duplicate verify calls, duplicate webhook delivery, and Firebase ETag conflicts.
-4. Confirm wallet balance and `famgatewayCredits/{orderId}` update together on the same user record; verify a repeated callback never increases the balance twice and a UTR cannot fund a second order.
-5. Configure a monitored recovery/reconciliation path for cases where the wallet credit succeeds but the subsequent order-status write fails. Retrying the same order should repair the status without adding the balance again.
-6. Do not merge or deploy until the above checks pass on staging.
-
-## Other security notes
-- The currently public repo had hard-coded Telegram bot token, database secret and external provider keys. Rotate all real credentials immediately and move them to secret environment variables. Removing a key from a future commit does not erase it from Git history.
-- Do not disable TLS verification.
-- The old success page accepted query-string payment details and included a hard-coded Telegram bot credential. It has been replaced with a non-authoritative return screen. Rotate any real Telegram bot token previously committed; removing it from the latest file does not remove it from Git history.
-- Verify webhook event names and exact response fields against a merchant test order before production use.
-- Run `php -l` on each PHP file and test a pending order, successful order, forged signature, amount mismatch, duplicate webhook, wrong-user request, expired order, and provider timeout before enabling deposits.
+## Security notes
+- Rotate any real Telegram bot token, database secret, provider API key, or other credential previously committed to public Git history. Removing a secret in a new commit does not erase old history.
+- Never disable TLS certificate verification.
+- The payment success/return page is not proof of payment; only server-side gateway verification can authorize a wallet credit.
