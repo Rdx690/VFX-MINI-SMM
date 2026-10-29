@@ -12,13 +12,13 @@ This branch introduces a new FamGateway-based Add Funds UI and server endpoints.
 - `check_payment.php`: disabled the legacy verification path because it accepted client-controlled amount/user identifiers and used obsolete gateway verification.
 
 ## Required deployment configuration
-Create a server-only `famgateway.config.php` from the example template, and ensure it is excluded from Git. Configure the following in the PHP hosting environment:
+The Firebase browser configuration in `firebase.js` and server settings in `famgateway.config.example.php` are intentionally blank so you can add your own values later. Firebase-dependent features and payments will not work until configured. Create a server-only `famgateway.config.php` from the example template, and ensure it is excluded from Git. Configure the following in the PHP hosting environment:
 - `FAMGATEWAY_API_KEY`: live merchant API key from the FamGateway dashboard.
 - `FIREBASE_WEB_API_KEY`: Firebase web API key used only server-side here to validate ID tokens. It is not a private service credential.
 - `FIREBASE_DATABASE_URL`: Realtime Database URL.
 - `PANEL_BASE_URL`: canonical HTTPS panel origin, e.g. `https://your-domain.example`; used to register the webhook URL.
 - `FIREBASE_ADMIN_TOKEN`: a server-side Firebase Admin REST credential/token with least privilege, or replace REST calls with the Firebase Admin SDK. Do not use a client-side database secret.
-- `FAMGATEWAY_WEBHOOK_SECRET`: optional; if not set, webhook verification uses `FAMGATEWAY_API_KEY` per the published FamGateway documentation.
+- `FAMGATEWAY_WEBHOOK_SECRET`: leave blank until you confirm the exact signing secret and signature format with FamGateway; webhook verification will reject requests until configured.
 
 Configure the FamGateway webhook URL in the merchant dashboard as:
 `https://YOUR-DOMAIN.example/famgateway-webhook.php`
