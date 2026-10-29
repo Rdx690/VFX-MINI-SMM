@@ -8,7 +8,7 @@ This branch introduces a new FamGateway-based Add Funds UI and server endpoints.
 - `famgateway-verify-payment.php`: verifies Firebase identity, order ownership, gateway payment status, transaction reference, and the exact stored amount before calling the shared idempotent wallet-credit helper.
 - `famgateway-webhook.php`: validates the HMAC-SHA256 signature over the raw body, independently verifies the order with FamGateway, checks the stored order/amount, then invokes the same idempotent wallet-credit helper.
 - `famgateway.config.example.php`: environment configuration template, including `PANEL_BASE_URL` for a canonical HTTPS webhook URL.
-- `famgateway-lib.php`: shared Firebase REST and ETag compare-and-set helper. The wallet balance and per-order credit ledger are saved in the same `users/{uid}` node so concurrent retries cannot credit the same order twice.
+- `famgateway-lib.php`: shared Firebase REST and ETag compare-and-set helper. The wallet balance and per-order credit ledger are saved in the same `users/{uid}` node so concurrent retries cannot credit the same order twice. A conditional claim at `famgateway_utrs/{sha256(UTR)}` also prevents one UTR being reused for a different order.
 - `check_payment.php`: disabled the legacy verification path because it accepted client-controlled amount/user identifiers and used obsolete gateway verification.
 
 ## Required deployment configuration
@@ -31,7 +31,7 @@ Before accepting live payments:
 1. Configure the FamGateway API key, webhook signing secret, Firebase server credential, Firebase web API key, and `PANEL_BASE_URL` as server-side environment variables.
 2. Confirm FamGateway's exact verify-order response fields and webhook signature/event schema using a merchant test order.
 3. Run `php -l` on every PHP endpoint and test pending/success/expired orders, wrong-user requests, amount mismatch, forged signatures, duplicate verify calls, duplicate webhook delivery, and Firebase ETag conflicts.
-4. Confirm wallet balance and `famgatewayCredits/{orderId}` update together on the same user record; verify a repeated callback never increases the balance twice.
+4. Confirm wallet balance and `famgatewayCredits/{orderId}` update together on the same user record; verify a repeated callback never increases the balance twice and a UTR cannot fund a second order.
 5. Configure a monitored recovery/reconciliation path for cases where the wallet credit succeeds but the subsequent order-status write fails. Retrying the same order should repair the status without adding the balance again.
 6. Do not merge or deploy until the above checks pass on staging.
 
