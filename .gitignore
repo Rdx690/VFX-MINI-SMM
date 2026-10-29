@@ -2,6 +2,6 @@
 /famgateway.config.php
 /.env
 /.env.*
-!/ .env.example
+!/.env.example
 *.log
 telegram_log.txt
