@@ -16,6 +16,7 @@ Create a server-only `famgateway.config.php` from the example template, and ensu
 - `FAMGATEWAY_API_KEY`: live merchant API key from the FamGateway dashboard.
 - `FIREBASE_WEB_API_KEY`: Firebase web API key used only server-side here to validate ID tokens. It is not a private service credential.
 - `FIREBASE_DATABASE_URL`: Realtime Database URL.
+- `PANEL_BASE_URL`: canonical HTTPS panel origin, e.g. `https://your-domain.example`; used to register the webhook URL.
 - `FIREBASE_ADMIN_TOKEN`: a server-side Firebase Admin REST credential/token with least privilege, or replace REST calls with the Firebase Admin SDK. Do not use a client-side database secret.
 - `FAMGATEWAY_WEBHOOK_SECRET`: optional; if not set, webhook verification uses `FAMGATEWAY_API_KEY` per the published FamGateway documentation.
 
